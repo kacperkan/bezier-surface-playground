@@ -16,6 +16,8 @@ For the visualization, I used mitsuba docker that was ran in the background. For
 - For each point on the surface, there's a separate normal vector calculated analytically for that point. 
 - The color range [red, blue] corresponds to signed distance values [-inf, inf] (points "below" the surface have negative values)
 
+![Example visualization](./img.png)
+
 ## Additional info
 
 `scene_create.py` contains an XML builder that builds a scene that is later parsed by the mitsuba engine through the API.
