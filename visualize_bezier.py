@@ -82,7 +82,7 @@ class BezierSurface:
         derivatives_u = self._derivatives_u(uv_coordinates)
         derivatives_v = self._derivatives_v(uv_coordinates)
         normals = np.cross(derivatives_v, derivatives_u)
-        normals /= np.linalg.norm(normals, ord=2, axis=1, keepdims=True)
+        normals /= np.linalg.norm(normals, ord=2, axis=-1, keepdims=True)
         return normals
 
     def get_points_on_surface(self, uv_coordinates: np.ndarray) -> np.ndarray:
@@ -292,7 +292,8 @@ def generate_point_view(
                 tuple(point), 0.04, distance_to_color_tuple(distance)
             )
 
-        normals = normals + sampled_points
+        # limiting length of normals for the proper visualization
+        normals = normals * 0.25 + sampled_points
         for normal, point in zip(
             normals[surface_index], sampled_points[surface_index]
         ):
