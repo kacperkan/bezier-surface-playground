@@ -34,8 +34,11 @@ def visualize_palette():
 
 
 class BezierSurface:
-    def __init__(self, control_points: np.ndarray):
+    def __init__(
+        self, control_points: np.ndarray, weights: t.Optional[np.ndarray]
+    ):
         self.control_points = control_points
+        self.weights = weights
         self.rng = np.random.RandomState(0)
         self.n_beziers = len(self.control_points)
         self._k_ij = control_points
@@ -79,8 +82,7 @@ class BezierSurface:
         return points, normals
 
     def get_normals_for_points(self, uv_coordinates: np.ndarray) -> np.ndarray:
-        derivatives_u = self._derivatives_u(uv_coordinates)
-        derivatives_v = self._derivatives_v(uv_coordinates)
+        derivatives_u, derivatives_v = self._derivatives_uv(uv_coordinates)
         normals = np.cross(derivatives_v, derivatives_u)
         normals /= np.linalg.norm(normals, ord=2, axis=-1, keepdims=True)
         return normals
@@ -97,7 +99,18 @@ class BezierSurface:
 
         coeffs_mult = np.expand_dims(b_u * b_v, axis=-1)
 
-        p_ij = coeffs_mult * np.expand_dims(self.control_points, 1)
+        reshaped_weights = self.weights[None, None, :, :, None]
+        denominator = (coeffs_mult * reshaped_weights).sum(
+            (2, 3), keepdims=True
+        )
+
+        p_ij = (
+            coeffs_mult
+            * np.expand_dims(self.control_points, 1)
+            * reshaped_weights
+            / denominator
+        )
+
         return p_ij.sum(axis=(2, 3))
 
     def _get_u_bernstein_polynomial_values(self, u: np.ndarray) -> np.ndarray:
@@ -114,38 +127,81 @@ class BezierSurface:
             * ((1 - v) ** (self._m - self._m_range))
         )
 
-    def _derivatives_u(self, uv_coordinates: np.ndarray) -> np.ndarray:
+    def _get_derivative_coefficients(
+        self, polynomial_coefficients: np.ndarray
+    ) -> np.ndarray:
+        x = polynomial_coefficients
+        x_sq = x ** 2
+        a_x = -3 + 6 * x - 3 * x_sq
+        b_x = 9 * x_sq - 12 * x + 3
+        c_x = 6 * x - 9 * x_sq
+        d_x = 3 * x_sq
+        coeffs = np.concatenate((a_x, b_x, c_x, d_x), axis=-1)[..., None]
+
+        return coeffs
+
+    def _derivatives_uv(
+        self, uv_coordinates: np.ndarray
+    ) -> t.Tuple[np.ndarray, np.ndarray]:
         u, v = uv_coordinates[..., 0], uv_coordinates[..., 1]
+
         u = np.expand_dims(u, axis=-1)
         v = np.expand_dims(v, axis=-1)
+
+        b_u = self._get_u_bernstein_polynomial_values(u)
         b_v = self._get_v_bernstein_polynomial_values(v)
-        coeffs = (
-            b_v[:, :, None, :, None]
-            * np.expand_dims(self.control_points, axis=1)
+
+        expanded_b_v = b_v[:, :, None, :, None]
+        expanded_b_u = b_u[:, :, :, None, None]
+        expanded_weights = self.weights[None, None, :, :, None]
+        expanded_ctrl_points = np.expand_dims(self.control_points, axis=1)
+
+        coeffs_for_u = (expanded_b_v * expanded_weights).sum(axis=3)
+        coeffs_for_v = (expanded_b_u * expanded_weights).sum(axis=2)
+
+        coeffs_for_u_with_pts = (
+            expanded_b_v * expanded_ctrl_points * expanded_weights
         ).sum(axis=3)
-
-        return (
-            -3 * (1 - u) ** 2 * coeffs[:, :, 0]
-            + (3 * (1 - u) ** 2 - 6 * u * (1 - u)) * coeffs[:, :, 1]
-            + (6 * u * (1 - u) - 3 * u ** 2) * coeffs[:, :, 2]
-            + 3 * u ** 2 * coeffs[:, :, 3]
-        )
-
-    def _derivatives_v(self, uv_coordinates: np.ndarray) -> np.ndarray:
-        u, v = uv_coordinates[..., 0], uv_coordinates[..., 1]
-        u = np.expand_dims(u, axis=-1)
-        v = np.expand_dims(v, axis=-1)
-        b_u = self._get_u_bernstein_polynomial_values(v)
-        coeffs = (
-            b_u[:, :, :, None, None]
-            * np.expand_dims(self.control_points, axis=1)
+        coeffs_for_v_with_pts = (
+            expanded_b_u * expanded_ctrl_points * expanded_weights
         ).sum(axis=2)
-        return (
-            -3 * (1 - v) ** 2 * coeffs[:, :, 0]
-            + (3 * (1 - v) ** 2 - 6 * v * (1 - v)) * coeffs[:, :, 1]
-            + (6 * v * (1 - v) - 3 * v ** 2) * coeffs[:, :, 2]
-            + 3 * v ** 2 * coeffs[:, :, 3]
+
+        g_uv = (
+            expanded_weights
+            * expanded_b_u
+            * expanded_b_v
+            * expanded_ctrl_points
+        ).sum(axis=(2, 3))
+
+        f_uv = (
+            1 / (expanded_weights * expanded_b_u * expanded_b_v + 1e-8)
+        ).sum(axis=(2, 3))
+
+        minus_g_uv_squared = -(g_uv ** 2)
+        d_u_coeffs = self._get_derivative_coefficients(u)
+        d_v_coeffs = self._get_derivative_coefficients(v)
+
+        derivative_of_f_uv_wrt_u = minus_g_uv_squared * (
+            d_u_coeffs * coeffs_for_u
+        ).sum(axis=2)
+        derivative_of_g_uv_wrt_u = (d_u_coeffs * coeffs_for_u_with_pts).sum(
+            axis=2
         )
+        derivatives_u = (
+            g_uv * derivative_of_f_uv_wrt_u + f_uv * derivative_of_g_uv_wrt_u
+        )
+
+        derivative_of_f_uv_wrt_v = minus_g_uv_squared * (
+            d_v_coeffs * coeffs_for_v
+        ).sum(axis=2)
+        derivative_of_g_uv_wrt_v = (d_v_coeffs * coeffs_for_v_with_pts).sum(
+            axis=2
+        )
+        derivatives_v = (
+            g_uv * derivative_of_f_uv_wrt_v + f_uv * derivative_of_g_uv_wrt_v
+        )
+
+        return derivatives_u, derivatives_v
 
     def get_distance_of_a_point(
         self, points: np.ndarray, num_iterations: int = 50
@@ -330,7 +386,6 @@ def main():
     y = np.repeat(
         np.linspace(-2, 2, num=4, dtype=np.float32)[:, np.newaxis], 4, axis=1
     )
-    z = np.random.normal(0, 0.4, (4, 4)).astype(np.float32)
 
     z = np.asarray(
         [[0, 0, -1, -1], [0, 1.5, 1.3, 0], [0, 0.5, 2, 0], [0, 0, 0, 0]],
@@ -341,13 +396,17 @@ def main():
     rotated_control_points = control_points.dot(rotation_matrix.T)
 
     control_points = np.stack([control_points, rotated_control_points], axis=0)
+    weights = np.asarray(
+        [[1, 1, 1, 1], [1, -1.5, 1.5, 1], [1, 5.5, 1.5, 1], [1, 1, 1, 1]],
+        dtype=np.float32,
+    )
 
-    surface = BezierSurface(control_points)
+    surface = BezierSurface(control_points, weights)
 
     (
         sampled_points,
         sampled_normals,
-    ) = surface.sample_surface_points_and_normals(300)
+    ) = surface.sample_surface_points_and_normals(2000)
 
     num_points = 2000
     points_to_calculate_distance = np.random.uniform(
